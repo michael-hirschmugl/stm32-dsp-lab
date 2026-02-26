@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "signal_gen.h"
 
 /* USER CODE END Includes */
 
@@ -53,7 +54,7 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ETH_Init(void);
+//static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
@@ -99,14 +100,42 @@ int main(void)
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
 
+#if SIG_USE_TIM2_DMA_TEST
+  // TIM2 -> DMA (Circular) Test: expects HT/TC IRQs and a filling RAM buffer.
+  SigDma_TestInit();
+  SigDma_TestStart();
+#else
+  //SigGen_Init();
+  //SigGen_Start();
+  //static int16_t block[SIG_BLOCK_SIZE];
+#endif
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
-    HAL_Delay(250);
+    //HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
+    //HAL_Delay(250);
+
+#if SIG_USE_TIM2_DMA_TEST
+    // Simple visibility: toggle LED when HT/TC counts change.
+    static uint32_t last_ht = 0, last_tc = 0;
+    if (sig_dma_ht_count != last_ht) {
+      last_ht = sig_dma_ht_count;
+      HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
+    }
+    if (sig_dma_tc_count != last_tc) {
+      last_tc = sig_dma_tc_count;
+      HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
+    }
+#else
+    //if (SigGen_Available() >= SIG_BLOCK_SIZE) {
+    //  SigGen_ReadBlock(block, SIG_BLOCK_SIZE);
+    //  HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
+    //}
+#endif
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -155,52 +184,52 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief ETH Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ETH_Init(void)
-{
-
-  /* USER CODE BEGIN ETH_Init 0 */
-
-  /* USER CODE END ETH_Init 0 */
-
-   static uint8_t MACAddr[6];
-
-  /* USER CODE BEGIN ETH_Init 1 */
-
-  /* USER CODE END ETH_Init 1 */
-  heth.Instance = ETH;
-  heth.Init.AutoNegotiation = ETH_AUTONEGOTIATION_ENABLE;
-  heth.Init.Speed = ETH_SPEED_100M;
-  heth.Init.DuplexMode = ETH_MODE_FULLDUPLEX;
-  heth.Init.PhyAddress = LAN8742A_PHY_ADDRESS;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
-  heth.Init.MACAddr = &MACAddr[0];
-  heth.Init.RxMode = ETH_RXPOLLING_MODE;
-  heth.Init.ChecksumMode = ETH_CHECKSUM_BY_HARDWARE;
-  heth.Init.MediaInterface = ETH_MEDIA_INTERFACE_RMII;
-
-  /* USER CODE BEGIN MACADDRESS */
-
-  /* USER CODE END MACADDRESS */
-
-  if (HAL_ETH_Init(&heth) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ETH_Init 2 */
-
-  /* USER CODE END ETH_Init 2 */
-
-}
+///**
+//  * @brief ETH Initialization Function
+//  * @param None
+//  * @retval None
+//  */
+//static void MX_ETH_Init(void)
+//{
+//
+//  /* USER CODE BEGIN ETH_Init 0 */
+//
+//  /* USER CODE END ETH_Init 0 */
+//
+//   static uint8_t MACAddr[6];
+//
+//  /* USER CODE BEGIN ETH_Init 1 */
+//
+//  /* USER CODE END ETH_Init 1 */
+//  heth.Instance = ETH;
+//  heth.Init.AutoNegotiation = ETH_AUTONEGOTIATION_ENABLE;
+//  heth.Init.Speed = ETH_SPEED_100M;
+//  heth.Init.DuplexMode = ETH_MODE_FULLDUPLEX;
+//  heth.Init.PhyAddress = LAN8742A_PHY_ADDRESS;
+//  MACAddr[0] = 0x00;
+//  MACAddr[1] = 0x80;
+//  MACAddr[2] = 0xE1;
+//  MACAddr[3] = 0x00;
+//  MACAddr[4] = 0x00;
+//  MACAddr[5] = 0x00;
+//  heth.Init.MACAddr = &MACAddr[0];
+//  heth.Init.RxMode = ETH_RXPOLLING_MODE;
+//  heth.Init.ChecksumMode = ETH_CHECKSUM_BY_HARDWARE;
+//  heth.Init.MediaInterface = ETH_MEDIA_INTERFACE_RMII;
+//
+//  /* USER CODE BEGIN MACADDRESS */
+//
+//  /* USER CODE END MACADDRESS */
+//
+//  if (HAL_ETH_Init(&heth) != HAL_OK)
+//  {
+//    Error_Handler();
+//  }
+//  /* USER CODE BEGIN ETH_Init 2 */
+//
+//  /* USER CODE END ETH_Init 2 */
+//
+//}
 
 /**
   * @brief USART3 Initialization Function

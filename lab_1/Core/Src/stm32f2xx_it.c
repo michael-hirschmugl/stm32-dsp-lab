@@ -22,6 +22,7 @@
 #include "stm32f2xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "signal_gen.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -199,5 +200,19 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+
+// DMA1 Stream1 is used by the TIM2->DMA test path (TIM2_UP -> DMA1 Stream1, CH3).
+void DMA1_Stream1_IRQHandler(void)
+{
+  SigDma_TestIRQHandler();
+}
+
+//void TIM2_IRQHandler(void)
+//{
+//  if (TIM2->SR & TIM_SR_UIF) {
+//    TIM2->SR = ~TIM_SR_UIF;   // UIF löschen (bei STM32 oft: 0 schreiben; so ist’s robust)
+//    SigGen_OnTick();
+//  }
+//}
 
 /* USER CODE END 1 */
