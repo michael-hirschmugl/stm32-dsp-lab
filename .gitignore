@@ -1,0 +1,60 @@
+# =========================
+# Build artifacts
+# =========================
+build/
+*/build/
+
+*.o
+*.d
+*.lst
+*.map
+*.elf
+*.hex
+*.bin
+*.out
+*.a
+
+# =========================
+# Debug / flashing artifacts
+# =========================
+*.log
+*.svd
+
+# OpenOCD / GDB temp files
+*.gdb
+*.gdb_history
+
+# =========================
+# IDE & Editor
+# =========================
+
+# VS Code
+.vscode/
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# Eclipse / STM32CubeIDE
+.project
+.cproject
+.settings/
+*.launch
+
+# Vim
+*.swp
+*.swo
+*~
+
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Dependency folders (future-proofing)
+# =========================
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
