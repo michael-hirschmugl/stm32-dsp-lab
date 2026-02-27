@@ -210,9 +210,13 @@ void DMA1_Stream1_IRQHandler(void)
 void TIM2_IRQHandler(void)
 {
   if (TIM2->SR & TIM_SR_UIF) {
-    TIM2->SR = ~TIM_SR_UIF;   // UIF löschen (bei STM32 oft: 0 schreiben; so ist’s robust)
+    TIM2->SR &= ~TIM_SR_UIF;   // UIF löschen (bei STM32 oft: 0 schreiben; so ist’s robust)
     SigGen_OnTick();
   }
+}
+
+void DMA1_Stream5_IRQHandler(void) {
+    SigDac_OutDmaIRQHandler();
 }
 
 /* USER CODE END 1 */
