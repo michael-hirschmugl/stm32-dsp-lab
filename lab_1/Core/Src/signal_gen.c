@@ -14,6 +14,7 @@ volatile uint32_t sig_dma_ht_count = 0;
 volatile uint32_t sig_dma_tc_count = 0;
 volatile uint32_t sig_dma_last_is_ht = 0;
 uint32_t          sig_dma_buf[SIG_DMA_BUF_LEN];
+uint32_t          val = 0xBEAF;
 
 #define SIG_DMAx              DMA1
 #define SIG_DMA_STREAM        DMA1_Stream1
@@ -156,7 +157,10 @@ void SigDma_TestInit(void) {
     SIG_DMA_STREAM->CR = 0;
     SIG_DMA_STREAM->NDTR = SIG_DMA_BUF_LEN;
     // Peripheral address: TIM2->ARR (konstanter Wert) -> ideal zum Testen
-    SIG_DMA_STREAM->PAR  = (uint32_t)&TIM2->ARR;
+    //SIG_DMA_STREAM->PAR  = (uint32_t)&TIM2->ARR;
+    TIM2->CCR1 = val;  // This is a hack in order to read real values with DMA peripheral-to-mem.
+    SIG_DMA_STREAM->PAR = (uint32_t)&TIM2->CCR1;
+    //SIG_DMA_STREAM->PAR  = (uint32_t)&val;
     // Memory address
     SIG_DMA_STREAM->M0AR = (uint32_t)&sig_dma_buf[0];
 
