@@ -2,71 +2,165 @@
 
 Real-time digital signal processing experiments on STM32 microcontrollers.
 
+---
+
 ## Overview
 
-This repository contains firmware prototypes and experimental implementations of digital signal processing (DSP) algorithms running on STM32 hardware.
-The goal is to explore DSP concepts under real-time constraints, directly on embedded systems programmed in C. The focus lies on practical implementation, performance analysis, and hardware-aware optimization.
-This project is intended as a structured playground for testing and validating signal processing ideas on actual microcontrollers rather than in simulation-only environments.
+STM32 DSP Lab is a structured collection of firmware experiments focused on **real-time digital signal processing under embedded constraints**.
 
-## Objectives
+Unlike simulation-only environments, this project emphasizes:
 
-* Implement fundamental DSP building blocks (filters, transforms, modulation, etc.)
-* Explore real-time constraints and deterministic timing behavior
-* Compare floating-point and fixed-point approaches
-* Investigate performance limits of different STM32 families
-* Evaluate memory usage, latency, and throughput
-* Experiment with CMSIS-DSP and custom implementations
+- Deterministic timing behavior
+- Hardware-driven data movement (DMA, timers, interrupts)
+- Measurable latency and throughput
+- Practical trade-offs between numerical formats
+- Reproducible experiments on real silicon
+
+All implementations are written in C and designed to run in minimal runtime or bare-metal environments.
+
+The guiding principle is simple:
+
+> DSP theory is only interesting if it survives contact with clock cycles.
+
+---
+
+## Project Goals
+
+This repository serves as a long-term experimental platform to:
+
+- Implement fundamental DSP building blocks (filters, transforms, modulation)
+- Explore real-time constraints and deterministic execution
+- Compare floating-point and fixed-point implementations
+- Measure performance across STM32 families
+- Analyze memory usage, latency, and throughput
+- Evaluate CMSIS-DSP versus custom implementations
+- Build reusable real-time streaming backbones
+
+The emphasis is on **measurable behavior**, not abstract correctness alone.
+
+---
+
+## Design Principles
+
+- Deterministic execution over abstraction convenience
+- Hardware-timed pipelines (timer + DMA driven)
+- Clear separation between algorithm and hardware layers
+- Minimal hidden complexity
+- Explicit control over memory layout and buffer handling
+- Transparent interrupt behavior
+- Reproducible and benchmarkable experiments
+
+Every lab builds on a stable streaming foundation before adding computational complexity.
+
+---
 
 ## Target Platform
 
-* STM32 microcontrollers
-* Bare-metal or minimal runtime environments
-* Written in C
-* Optional use of CMSIS and CMSIS-DSP
+Primary target:
 
-Specific board configurations and supported MCU families will be documented as the project evolves.
+- STM32 microcontrollers (starting with STM32F2xx family)
+- ARM Cortex-M cores
+- Bare-metal or minimal runtime environments
+- C language
 
-## Repository Structure (Planned)
+Optional components:
 
-```Code/core```          -> Shared utilities and hardware abstraction  
-```/dsp```               -> DSP algorithm implementations  
-```/examples```          -> Self-contained demo applications  
-```/drivers```           -> Peripheral configuration (ADC, DAC, DMA, etc.)  
-```/benchmarks```        -> Performance and timing tests  
-```/docs```              -> Notes and theoretical background
+- CMSIS
+- CMSIS-DSP
+- ST HAL or direct register-level programming
 
-Structure may evolve as the project grows.
+Specific board configurations and MCU families will be documented per lab.
+
+---
+
+## Repository Structure
+
+Current and planned structure:
+
+```
+/core        -> Shared utilities and hardware abstraction
+/dsp         -> DSP algorithm implementations
+/examples    -> Self-contained demo applications
+/drivers     -> Peripheral configuration (ADC, DAC, DMA, timers)
+/benchmarks  -> Performance and timing measurements
+/docs        -> Notes, experiments, theory references
+/labs        -> Structured step-by-step lab exercises
+```
+
+The structure may evolve as the project matures.
+
+---
 
 ## Implemented / Planned Topics
 
-* FIR and IIR filters
-* FFT and spectral analysis
-* Window functions
-* Signal generation (sine, noise, modulation)
-* Audio processing
-* Fixed-point arithmetic techniques
-* DMA-based real-time streaming
-* Interrupt-driven processing pipelines
+Signal Processing:
 
-## Design Philosophy
+- FIR filters
+- IIR filters
+- FFT and spectral analysis
+- Window functions
+- Envelope detection
+- Modulation techniques
+- Noise generation
+- Audio processing pipelines
 
-* Deterministic execution over abstraction convenience
-* Clear separation between algorithm and hardware layer
-* Measurable performance
-* Reproducible experiments
-* Minimal hidden complexity
+System-Level Topics:
 
-DSP theory is only interesting if it survives contact with clock cycles.
+- DMA-based circular streaming
+- Ping-pong buffer architectures
+- Interrupt-driven processing windows
+- Real-time scheduling constraints
+- Fixed-point arithmetic strategies
+- Latency analysis
+- Cache and memory alignment considerations
 
-## Build
+---
 
-Toolchain and build instructions will be added once a baseline configuration is established.
+## Lab Structure
 
-Typical setup:
-* ARM GCC toolchain
-* STM32CubeMX or manual peripheral configuration
-* Makefile or CMake-based build system
+The project is organized into incremental labs.
+
+Example progression:
+
+- Lab 1: Deterministic DMA-based streaming backbone
+- Lab 2: Inserting real-time DSP into ping-pong windows
+- Lab 3: Fixed-point optimization
+- Lab 4: Performance benchmarking and profiling
+- Lab 5+: Advanced processing (spectral, modulation, filtering chains)
+
+Each lab introduces controlled complexity while preserving real-time guarantees.
+
+---
+
+## Build System
+
+Typical toolchain:
+
+- ARM GNU Toolchain (arm-none-eabi-gcc)
+- Makefile or CMake-based build
+- Optional STM32CubeMX for peripheral scaffolding
+- OpenOCD / ST-Link for flashing and debugging
+
+Exact build instructions are provided per lab once stable configurations are finalized.
+
+---
+
+## Measurement & Validation Philosophy
+
+All experiments should be:
+
+- Observable (UART logging, FFT visualization, buffer dumps)
+- Measurable (cycle counts, CPU load, memory footprint)
+- Repeatable
+- Hardware-verified
+
+Simulation is useful — but hardware truth is final.
+
+---
 
 ## Status
 
-This project is currently in its early experimental phase.
+This project is in active development.
+
+The streaming backbone is established.
+Subsequent labs will expand into structured real-time DSP processing and performance analysis.
