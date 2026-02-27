@@ -16,22 +16,22 @@
 //#endif
 
 // ---- Schalter ----
-//#define SIG_ENABLE_TONE1      1
-//#define SIG_ENABLE_TONE2      1
-//#define SIG_ENABLE_TONE3      0
-//#define SIG_ENABLE_NOISE      1
+#define SIG_ENABLE_TONE1      1
+#define SIG_ENABLE_TONE2      1
+#define SIG_ENABLE_TONE3      0
+#define SIG_ENABLE_NOISE      0
 
 // ---- Parameter ----
-//#define SIG_TONE1_FREQ_HZ     440.0f
-//#define SIG_TONE1_AMP         0.55f
-//
-//#define SIG_TONE2_FREQ_HZ     880.0f
-//#define SIG_TONE2_AMP         0.25f
-//
-//#define SIG_TONE3_FREQ_HZ     1760.0f
-//#define SIG_TONE3_AMP         0.10f
-//
-//#define SIG_NOISE_AMP         0.03f   // “leichtes” Rauschen
+#define SIG_TONE1_FREQ_HZ     440.0f
+#define SIG_TONE1_AMP         0.55f
+
+#define SIG_TONE2_FREQ_HZ     880.0f
+#define SIG_TONE2_AMP         0.25f
+
+#define SIG_TONE3_FREQ_HZ     1760.0f
+#define SIG_TONE3_AMP         0.10f
+
+#define SIG_NOISE_AMP         0.03f   // “leichtes” Rauschen
 
 // Optional: echte Analog-Ausgabe über DAC (PA4), später aktivieren
 //#define SIG_ENABLE_DAC_OUT    0
@@ -53,22 +53,22 @@
 #endif
 
 #ifndef SIG_DMA_BUF_LEN
-#define SIG_DMA_BUF_LEN        8096u  // N (<= 65535)
+#define SIG_DMA_BUF_LEN        512u  // N (<= 65535)
 #endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-//void     SigGen_Init(void);
-//void     SigGen_Start(void);
+void     SigGen_Init(void);
+void     SigGen_Start(void);
 
 // “ADC-like” API:
 //size_t   SigGen_Available(void);
 //size_t   SigGen_ReadBlock(int16_t* dst, size_t n);
 
 // ISR hook (wird vom TIM2_IRQHandler aufgerufen)
-//void     SigGen_OnTick(void);
+void     SigGen_OnTick(void);
 
 // DMA-Test API
 void     SigDma_TestInit(void);
@@ -78,7 +78,7 @@ void     SigDma_TestIRQHandler(void);
 extern volatile uint32_t sig_dma_ht_count;
 extern volatile uint32_t sig_dma_tc_count;
 extern volatile uint32_t sig_dma_last_is_ht;
-extern uint32_t          sig_dma_buf[SIG_DMA_BUF_LEN];
+extern int16_t           sig_dma_buf[SIG_DMA_BUF_LEN];
 
 #ifdef __cplusplus
 }

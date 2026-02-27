@@ -13,7 +13,7 @@
 volatile uint32_t sig_dma_ht_count = 0;
 volatile uint32_t sig_dma_tc_count = 0;
 volatile uint32_t sig_dma_last_is_ht = 0;
-uint32_t          sig_dma_buf[SIG_DMA_BUF_LEN];
+int16_t           sig_dma_buf[SIG_DMA_BUF_LEN];
 uint32_t          val = 0xBEAF;
 
 #define SIG_DMAx              DMA1
@@ -46,52 +46,52 @@ uint32_t          val = 0xBEAF;
 
 // ---------------- Fast Cos via LUT ----------------
 // 1024er Cos-Tabelle (Q15-ish wäre auch möglich; hier float für Einfachheit)
-//#define COS_LUT_BITS   10u
-//#define COS_LUT_SIZE   (1u << COS_LUT_BITS)
-//static float cos_lut[COS_LUT_SIZE];
-//
-//static inline float fast_cos_u32(uint32_t phase) {
-//    // phase: 0..2^32-1 -> Index 0..COS_LUT_SIZE-1
-//    uint32_t idx = phase >> (32u - COS_LUT_BITS);
-//    return cos_lut[idx];
-//}
-//
-//// ---------------- DDS ----------------
-//typedef struct {
-//    uint32_t phase;
-//    uint32_t inc;
-//    float    amp;
-//    uint8_t  en;
-//} dds_t;
-//
-//static dds_t t1, t2, t3;
-//
-//// ---------------- Noise (xorshift32) ----------------
-//static uint32_t rng = 0x12345678u;
-//static inline uint32_t xorshift32(void) {
-//    uint32_t x = rng;
-//    x ^= x << 13;
-//    x ^= x >> 17;
-//    x ^= x << 5;
-//    rng = x;
-//    return x;
-//}
-//static inline float white_noise_uniform(void) {
-//    // uniform in [-1, +1]
-//    uint32_t r = xorshift32();
-//    // 24-bit mantissa-ish
-//    float u = (float)(r & 0x00FFFFFFu) * (1.0f / 16777215.0f);
-//    return 2.0f * u - 1.0f;
-//}
-//
-//static inline uint32_t phase_inc_from_freq(float f_hz) {
-//    // inc = f * 2^32 / Fs
-//    // Achtung: float -> uint32, rounding ok
-//    double inc = (double)f_hz * (4294967296.0 / (double)SIG_FS_HZ);
-//    if (inc < 0) inc = 0;
-//    if (inc > 4294967295.0) inc = 4294967295.0;
-//    return (uint32_t)inc;
-//}
+#define COS_LUT_BITS   10u
+#define COS_LUT_SIZE   (1u << COS_LUT_BITS)
+static float cos_lut[COS_LUT_SIZE];
+
+static inline float fast_cos_u32(uint32_t phase) {
+    // phase: 0..2^32-1 -> Index 0..COS_LUT_SIZE-1
+    uint32_t idx = phase >> (32u - COS_LUT_BITS);
+    return cos_lut[idx];
+}
+
+// ---------------- DDS ----------------
+typedef struct {
+    uint32_t phase;
+    uint32_t inc;
+    float    amp;
+    uint8_t  en;
+} dds_t;
+
+static dds_t t1, t2, t3;
+
+// ---------------- Noise (xorshift32) ----------------
+static uint32_t rng = 0x12345678u;
+static inline uint32_t xorshift32(void) {
+    uint32_t x = rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    rng = x;
+    return x;
+}
+static inline float white_noise_uniform(void) {
+    // uniform in [-1, +1]
+    uint32_t r = xorshift32();
+    // 24-bit mantissa-ish
+    float u = (float)(r & 0x00FFFFFFu) * (1.0f / 16777215.0f);
+    return 2.0f * u - 1.0f;
+}
+
+static inline uint32_t phase_inc_from_freq(float f_hz) {
+    // inc = f * 2^32 / Fs
+    // Achtung: float -> uint32, rounding ok
+    double inc = (double)f_hz * (4294967296.0 / (double)SIG_FS_HZ);
+    if (inc < 0) inc = 0;
+    if (inc > 4294967295.0) inc = 4294967295.0;
+    return (uint32_t)inc;
+}
 
 // ---------------- Optional DAC (PA4 -> DAC1) ----------------
 //#if SIG_ENABLE_DAC_OUT
@@ -135,6 +135,7 @@ static void tim2_disable_update_irq(void) {
 }
 
 void SigDma_TestInit(void) {
+    SigGen_Init();
     // TIM2 @ SIG_FS_HZ (default SIG_FS_HZ can be overridden to 44100 in signal_gen.h)
     tim2_init_fs();
     tim2_disable_update_irq();
@@ -158,7 +159,7 @@ void SigDma_TestInit(void) {
     SIG_DMA_STREAM->NDTR = SIG_DMA_BUF_LEN;
     // Peripheral address: TIM2->ARR (konstanter Wert) -> ideal zum Testen
     //SIG_DMA_STREAM->PAR  = (uint32_t)&TIM2->ARR;
-    TIM2->CCR1 = val;  // This is a hack in order to read real values with DMA peripheral-to-mem.
+    TIM2->CCR1 = val;  // This is a hack in order to read real values with DMA peripheral-to-mem. // initial “seed”
     SIG_DMA_STREAM->PAR = (uint32_t)&TIM2->CCR1;
     //SIG_DMA_STREAM->PAR  = (uint32_t)&val;
     // Memory address
@@ -173,8 +174,8 @@ void SigDma_TestInit(void) {
         (SIG_DMA_CHSEL << DMA_SxCR_CHSEL_Pos) |
         DMA_SxCR_MINC |
         DMA_SxCR_CIRC |
-        DMA_SxCR_PSIZE_1 |
-        DMA_SxCR_MSIZE_1 |
+        DMA_SxCR_PSIZE_0 |  // 16-bit peripheral
+        DMA_SxCR_MSIZE_0 |  // 16-bit memory
         DMA_SxCR_HTIE |
         DMA_SxCR_TCIE |
         DMA_SxCR_TEIE |
@@ -183,8 +184,15 @@ void SigDma_TestInit(void) {
     // FIFO disabled (direct mode) is fine here
     SIG_DMA_STREAM->FCR = 0;
 
+    DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_TIM2_STOP;
+
     // Enable DMA request on TIM2 update event
     TIM2->DIER |= TIM_DIER_UDE;
+
+    // Generator tick @ Fs:
+    TIM2->DIER |= TIM_DIER_UIE;        // Update Interrupt enable
+    NVIC_SetPriority(TIM2_IRQn, 5);
+    NVIC_EnableIRQ(TIM2_IRQn);
 
     // NVIC for DMA stream
     NVIC_SetPriority(SIG_DMA_STREAM_IRQn, 6);
@@ -225,67 +233,54 @@ void SigDma_TestIRQHandler(void) {
     }
 }
 
-//void SigGen_Init(void) {
-//    // LUT init
-//    for (uint32_t i = 0; i < COS_LUT_SIZE; i++) {
-//        float a = 2.0f * (float)M_PI * (float)i / (float)COS_LUT_SIZE;
-//        cos_lut[i] = cosf(a);
-//    }
-//
-//    // DDS setup
-//    t1.phase = 0; t1.inc = phase_inc_from_freq(SIG_TONE1_FREQ_HZ); t1.amp = SIG_TONE1_AMP; t1.en = SIG_ENABLE_TONE1;
-//    t2.phase = 0; t2.inc = phase_inc_from_freq(SIG_TONE2_FREQ_HZ); t2.amp = SIG_TONE2_AMP; t2.en = SIG_ENABLE_TONE2;
-//    t3.phase = 0; t3.inc = phase_inc_from_freq(SIG_TONE3_FREQ_HZ); t3.amp = SIG_TONE3_AMP; t3.en = SIG_ENABLE_TONE3;
-//
-//    wr = rd = 0;
-//
-//#if SIG_ENABLE_DAC_OUT
-//    dac_init_pa4();
-//#endif
-//
-//    tim2_init_fs();
-//}
-//
-//void SigGen_Start(void) {
-//    TIM2->CNT = 0;
-//    TIM2->CR1 |= TIM_CR1_CEN;
-//}
+void SigGen_Init(void) {
+    // LUT init
+    for (uint32_t i = 0; i < COS_LUT_SIZE; i++) {
+        float a = 2.0f * (float)M_PI * (float)i / (float)COS_LUT_SIZE;
+        cos_lut[i] = cosf(a);
+    }
 
-//static inline int16_t float_to_q15_clip(float x) {
-//    // clip to [-1, 1)
-//    if (x > 0.999969f) x = 0.999969f;
-//    if (x < -1.0f)     x = -1.0f;
-//    int32_t v = (int32_t)lrintf(x * 32768.0f);
-//    if (v >  32767) v =  32767;
-//    if (v < -32768) v = -32768;
-//    return (int16_t)v;
-//}
+    // DDS setup
+    t1.phase = 0; t1.inc = phase_inc_from_freq(SIG_TONE1_FREQ_HZ); t1.amp = SIG_TONE1_AMP; t1.en = SIG_ENABLE_TONE1;
+    t2.phase = 0; t2.inc = phase_inc_from_freq(SIG_TONE2_FREQ_HZ); t2.amp = SIG_TONE2_AMP; t2.en = SIG_ENABLE_TONE2;
+    t3.phase = 0; t3.inc = phase_inc_from_freq(SIG_TONE3_FREQ_HZ); t3.amp = SIG_TONE3_AMP; t3.en = SIG_ENABLE_TONE3;
 
-//void SigGen_OnTick(void) {
-//    // Ringbuffer voll? (1 Slot frei lassen ist elegant; hier simpel: drop wenn fast voll)
-//    if (SigGen_Available() >= (SIG_RING_LEN - 1u)) {
-//        return;
-//    }
-//
-//    float s = 0.0f;
-//
-//    if (t1.en) { s += t1.amp * fast_cos_u32(t1.phase); t1.phase += t1.inc; }
-//    if (t2.en) { s += t2.amp * fast_cos_u32(t2.phase); t2.phase += t2.inc; }
-//    if (t3.en) { s += t3.amp * fast_cos_u32(t3.phase); t3.phase += t3.inc; }
-//
-//#if SIG_ENABLE_NOISE
-//    s += SIG_NOISE_AMP * white_noise_uniform();
-//#endif
-//
-//    // leichte Gesamt-Sättigung wie ADC
-//    int16_t q = float_to_q15_clip(s);
-//
-//    ring[wr & ring_mask()] = q;
-//    wr++;
-//
-//#if SIG_ENABLE_DAC_OUT
-//    // auf 12-bit DAC: q15 -> 0..4095
-//    uint16_t u = (uint16_t)((((int32_t)q + 32768) * 4095) / 65535);
-//    dac_write_u12(u);
-//#endif
-//}
+    //wr = rd = 0;
+
+#if SIG_ENABLE_DAC_OUT
+    dac_init_pa4();
+#endif
+
+    tim2_init_fs();
+}
+
+void SigGen_Start(void) {
+    TIM2->CNT = 0;
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+static inline int16_t float_to_q15_clip(float x) {
+    if (x > 0.999969f) x = 0.999969f;
+    if (x < -1.0f)     x = -1.0f;
+    int32_t v = (int32_t)lrintf(x * 32768.0f);
+    if (v >  32767) v =  32767;
+    if (v < -32768) v = -32768;
+    return (int16_t)v;
+}
+
+void SigGen_OnTick(void) {
+    float s = 0.0f;
+
+    if (t1.en) { s += t1.amp * fast_cos_u32(t1.phase); t1.phase += t1.inc; }
+    if (t2.en) { s += t2.amp * fast_cos_u32(t2.phase); t2.phase += t2.inc; }
+    if (t3.en) { s += t3.amp * fast_cos_u32(t3.phase); t3.phase += t3.inc; }
+
+#if SIG_ENABLE_NOISE
+    s += SIG_NOISE_AMP * white_noise_uniform();
+#endif
+
+    int16_t q = float_to_q15_clip(s);
+
+    // Wichtig: CCR1 vor dem *nächsten* DMA-Request setzen (Pipeline um 1 Sample ist ok)
+    TIM2->CCR1 = (uint16_t)q;   // Bits bleiben identisch, DMA liest die 16 Bit roh.
+}
