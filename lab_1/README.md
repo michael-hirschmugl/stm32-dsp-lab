@@ -1,157 +1,258 @@
-# Lab 1 -- Audio Stream Simulation with DMA and Circular Ping-Pong Buffer
+# Lab 1 — Deterministic Audio Stream (TIM2 + DMA Ping‑Pong + DAC) on STM32F207
 
-## Objective
+Lab 1 builds the **hardware‑timed streaming backbone** for later DSP labs.
 
-The goal of Lab 1 is to build a deterministic real-time audio stream
-simulation on an STM32F207 microcontroller. This lab focuses on
-establishing a clean and hardware-driven data pipeline using:
+Target hardware: **STM32F207 (Nucleo‑F207ZG)**
 
--   Timer-triggered DMA transfers
--   Circular (ping-pong) buffer architecture
--   Interrupt-based half/full transfer signaling
--   Parametric audio signal generation
--   DAC-based real-time audio output
+This lab implements:
 
-No signal processing is performed in this lab. The objective is to
-create a stable streaming foundation that will be extended in Lab 2.
+- **TIM2** as a single master sample clock (e.g. **44.1 kHz**)
+- **DMA in circular mode** with **Half Transfer / Transfer Complete** signaling (ping‑pong)
+- A **DDS‑based multi‑tone signal generator** (optional white noise)
+- **DAC output (PA4 / DAC_OUT1)** triggered by **TIM2_TRGO** and fed by **DMA (memory → peripheral)**
+- Clean separation between **ISR duties** (minimal) and **CPU block work** (main loop)
 
-------------------------------------------------------------------------
+**No DSP is performed in Lab 1.**  
+Lab 2+ will insert processing into the same ping‑pong work window.
 
-## System Architecture
+---
 
-The system simulates an audio acquisition and playback pipeline using
-hardware peripherals and DMA.
+## 1) Goal
 
-### 1. Audio Signal Generation
+Create a deterministic, hardware‑driven streaming system that:
 
-A parametric audio signal (multi-tone DDS-based generator with optional
-noise) is generated in software.\
-The generator operates at a fixed sample rate (e.g., 44.1 kHz).
+- generates **one sample per tick** (software generator)
+- moves samples with **DMA** (hardware transport)
+- exposes deterministic **half‑buffer work windows** (ping‑pong)
+- optionally outputs the stream via **DAC** using the **same master clock**
 
-### 2. Timer-Driven Sample Clock
+---
 
-TIM2 is configured to run at the selected sample rate.\
-Each timer update event generates a DMA request.
+## 2) System Architecture (High Level)
 
-This ensures that the system timing is hardware-driven and
-deterministic.
+A single clock domain (TIM2) drives everything:
 
-### 3. DMA Circular Buffer (Ping-Pong)
-
-A circular buffer of size **N** samples is used:
-
+```text
+                     +----------------------+
+                     |      TIM2 @ Fs       |
+                     |  (Update Event @ Fs) |
+                     +----------+-----------+
+                                |
+             +------------------+------------------+
+             |                                     |
+             v                                     v
+  (IRQ) TIM2_IRQHandler                      TIM2_TRGO = Update
+  SigGen_OnTick()                                 |
+  writes next sample                               v
+  into TIM2->CCR1                             +----------+
+                                             |   DAC    |
+                                             | trigger  |
+                                             +----+-----+
+                                                  |
+                                      (DMA request from DAC)
+                                                  |
+                                                  v
+                                              DMA (M2P)
+                                             dac_dma_buf[]
+                                           -> DAC->DHR12R1
+                                                  |
+                                                  v
+                                             PA4 (DAC_OUT1)
 ```
-|----------- N samples -----------|
-|------ N/2 ------|------ N/2 ----|
+
+In parallel, the TIM2 update also triggers the **input DMA** which captures the generated sample:
+
+```text
+TIM2 Update DMA Request  -->  DMA (P2M)  --> sig_dma_buf[] (int16, circular)
+                                   |--> HT interrupt (first half ready)
+                                   |--> TC interrupt (second half ready)
 ```
 
-DMA behavior:
+---
 
--   On each timer event, one sample is written into the buffer.
--   After **N/2 samples**, a Half Transfer (HT) interrupt is triggered.
--   After **N samples**, a Transfer Complete (TC) interrupt is
-    triggered.
--   The buffer then wraps automatically (circular mode).
+## 3) Data Path Details
 
-This creates a classic ping-pong buffer structure.
+### 3.1 Signal Generator (software DDS)
 
-### 4. CPU Notification via Interrupts
+The generator is implemented as a small DDS bank:
 
--   HT Interrupt → First half of buffer is ready for processing.
--   TC Interrupt → Second half of buffer is ready for processing.
+- up to **3 cosine oscillators** (compile‑time enable)
+- optional **white noise** (xorshift32)
+- output is produced **sample‑by‑sample** in `TIM2_IRQHandler`
 
-The CPU can safely operate on one half of the buffer while DMA fills the
-other half.
+Configuration lives in `signal_gen.h`:
 
-In Lab 1, no processing is performed. The interrupts are used only to
-validate correct timing and buffer operation.
+- `SIG_ENABLE_TONE1/2/3`
+- `SIG_TONE*_FREQ_HZ`, `SIG_TONE*_AMP`
+- `SIG_ENABLE_NOISE`, `SIG_NOISE_AMP`
+- `SIG_FS_HZ`
 
-### 5. DAC Output (Test Output Stage)
+The generator output is `int16_t` samples (audio‑style signed).
 
-For validation purposes, the generated audio signal is routed to the
-onboard DAC.
+**Important implementation detail (intentional “hack”):**  
+The sample is written into **TIM2->CCR1** so that the **P2M DMA** can read a real
+peripheral register that changes every sample.
 
-This allows:
+---
 
--   Listening to the generated waveform
--   Verifying timing stability
--   Confirming correct DMA-to-peripheral operation
+### 3.2 TIM2: Master Sample Clock
 
-### 6. Continuous FFT Monitoring (Visualization Path)
+TIM2 is configured for `SIG_FS_HZ`:
 
-In parallel, an FFT runs continuously on the buffered data.\
-The resulting spectrum is transmitted via UART to a PC application.
+- Default: **44100 Hz**
+- Timer clock assumption (from current clock tree): **60 MHz**
+- `ARR` is computed to approximate Fs
 
-The GUI displays:
+TIM2 provides:
 
--   Real-time frequency spectrum
--   System activity visibility
--   Confirmation of correct signal generation
+- **Update interrupt (UIE)** → runs `SigGen_OnTick()`
+- **Update DMA request (UDE)** → triggers the input DMA (P2M)
+- **TRGO = Update event** (`MMS=010`) → triggers DAC conversions
 
-This provides insight into what the processor is handling internally.
+This keeps the whole system **hardware‑timed** and **deterministic**.
 
-------------------------------------------------------------------------
+---
 
-## Lab 1 Scope
+### 3.3 Input DMA (Peripheral → Memory): Ping‑Pong Buffer
 
-Lab 1 includes:
+**Purpose:** capture one generated sample per tick into a circular buffer.
 
--   Hardware timer configuration
--   DMA setup in circular mode
--   HT/TC interrupt handling
--   Ping-pong buffer management
--   Parametric signal generation
--   DAC-based audio output
--   UART-based FFT data transmission
+- Source: `TIM2->CCR1`
+- Destination: `sig_dma_buf[]` (`int16_t`)
+- Mode: **circular**
+- Interrupts: **HT**, **TC**, **TE**
 
-Lab 1 explicitly excludes:
+Ping‑pong layout:
 
--   Any audio processing or filtering
--   DSP effects
--   Buffer modifications beyond basic streaming
+```text
+sig_dma_buf (N samples):
++-----------------------+-----------------------+
+|  first half (N/2)     |  second half (N/2)    |
++-----------------------+-----------------------+
+        HT IRQ                     TC IRQ
+```
 
-The focus is purely on building a robust real-time streaming
-infrastructure.
+**Safety rule:**
 
-------------------------------------------------------------------------
+- On **HT**: DMA is writing the **second half**, so the CPU may safely read the **first half**
+- On **TC**: DMA is writing the **first half**, so the CPU may safely read the **second half**
 
-## What You Should Observe
+The ISR updates counters:
 
--   Stable HT and TC interrupt cadence
--   Continuous circular buffer operation
--   Audible tone output via DAC
--   Real-time FFT visualization on PC
--   No buffer overruns or timing instability
+- `sig_dma_ht_count`
+- `sig_dma_tc_count`
+- `sig_dma_last_is_ht` (debug convenience)
 
-------------------------------------------------------------------------
+The main loop watches these counters and consumes each half exactly once.
 
-## Why This Architecture Matters
+---
 
-This structure mirrors professional embedded audio systems:
+### 3.4 CPU Block Stage (no DSP yet)
 
--   Hardware-timed sample clocks
--   DMA-based data movement
--   Ping-pong buffering for deterministic processing windows
+Lab 1 does not modify audio. It only demonstrates safe block acquisition and a stable work window.
 
-It provides a clean separation between:
+- `cpu_block[]` holds the copied input half‑buffer
+- `cpu_block_processed[]` is currently **copy‑through** (placeholder)
 
--   Data acquisition
--   Data transport
--   Processing
--   Output
+This is where Lab 2 inserts DSP.
 
-In Lab 2, actual signal processing will be inserted into the processing
-window created by the ping-pong buffer structure.
+---
 
-------------------------------------------------------------------------
+### 3.5 DAC Output (Memory → Peripheral), TIM2‑Triggered
 
-## Next Steps (Lab 2 Preview)
+**Purpose:** produce an analog signal synchronized to the same sample clock.
 
-In Lab 2:
+- Output pin: **PA4 (DAC_OUT1)**
+- Trigger: **TIM2_TRGO** (update event)
+- DAC DMA stream: circular **M2P** transfers
+  - Source: `dac_dma_buf[]` (`uint16_t`, holds 12‑bit right‑aligned samples)
+  - Destination: `DAC->DHR12R1`
 
--   Real-time DSP processing will be added
--   Processing will occur inside the HT/TC windows
--   Latency and computational limits will be analyzed
+In the main loop, when HT/TC indicates a new input half‑block, the firmware fills the corresponding half of `dac_dma_buf[]`:
 
-Lab 1 ensures that the streaming backbone is stable before adding
-computational complexity.
+- `int16_t` audio range `[-32768..32767]`
+- mapped to DAC unsigned 12‑bit `[0..4095]` with midscale offset (2048)
+
+This forms a lockstep “capture → optional processing → output” flow at block granularity.
+
+---
+
+## 4) Code Structure
+
+### `signal_gen.h`
+- compile‑time configuration (Fs, tones, noise, buffer sizes, feature flags)
+- public API for generator, input DMA, DAC output
+- exported counters and buffers
+
+### `signal_gen.c`
+- TIM2 configuration (Fs + TRGO)
+- DDS + noise generator
+- input DMA (P2M) configuration and ISR hook
+- DAC configuration (trigger + DMA enable)
+- DAC DMA (M2P) configuration and ISR hook
+
+### `main.c`
+- system init (HAL / Cube)
+- starts the pipeline (`SigDma_TestInit()`, `SigDma_TestStart()`)
+- polls HT/TC counters
+- copies stable half‑buffer into CPU workspace
+- copy‑through to processed buffer (placeholder for DSP)
+- fills DAC output half‑buffer
+- toggles an LED for activity visibility
+
+### `stm32f2xx_it.c`
+- minimal ISR glue only:
+  - `TIM2_IRQHandler`: clear UIF + `SigGen_OnTick()`
+  - `DMA1_Stream1_IRQHandler`: `SigDma_TestIRQHandler()`
+  - `DMA1_Stream5_IRQHandler`: `SigDac_OutDmaIRQHandler()` (optional instrumentation)
+
+---
+
+## 5) What You Should Observe
+
+- `sig_dma_ht_count` and `sig_dma_tc_count` increment steadily
+- `cpu_blocks` increments once per half‑buffer consumed
+- LED toggles at a stable cadence (block rate)
+- analog output on **PA4 (DAC_OUT1)** when routed to a suitable load/amplifier
+
+---
+
+## 6) Hardware Notes (Nucleo‑F207ZG)
+
+- DAC output is **PA4 / DAC_OUT1** (DAC channel 1).
+- On Nucleo boards, “Arduino A* pins” are not guaranteed to match DAC pins.
+  Use the board’s pinout to locate **PA4** on the headers.
+
+**Electrical reality check:**
+- The DAC pin is **not** a headphone driver.
+- Prefer an amplifier / powered speaker / line‑in.
+- If you must test with headphones, use proper coupling and protection (series resistor, capacitor),
+  and keep volume expectations realistic.
+
+---
+
+## 7) Why This Matters
+
+This is the core architecture of many embedded audio systems:
+
+- hardware‑timed sample clock
+- DMA transport to avoid jitter
+- ping‑pong buffering for deterministic processing windows
+- output synchronized to the same clock to prevent drift
+
+Lab 1 answers the crucial pre‑DSP question:
+
+> “Is my real‑time pipeline stable, deterministic, and block‑safe?”
+
+---
+
+## 8) Lab 2 Preview
+
+Lab 2 will replace “copy‑through” with real DSP:
+
+- process in the HT/TC work windows
+- analyze CPU load and headroom
+- explore latency vs. block size
+- add first effects/filters (gain, clipping, FIR/IIR, delay, etc.)
+
+Lab 1 is complete once the streaming backbone is stable and observable.
