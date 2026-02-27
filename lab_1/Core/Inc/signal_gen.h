@@ -54,6 +54,7 @@
 
 #ifndef SIG_DMA_BUF_LEN
 #define SIG_DMA_BUF_LEN        512u  // N (<= 65535)
+#define SIG_DMA_HALF_LEN       (SIG_DMA_BUF_LEN/2)
 #endif
 
 #ifdef __cplusplus

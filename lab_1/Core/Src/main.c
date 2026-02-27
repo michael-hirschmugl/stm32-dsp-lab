@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "signal_gen.h"
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -32,6 +33,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define SIG_HALF_LEN   (SIG_DMA_BUF_LEN/2)
 
 /* USER CODE END PD */
 
@@ -63,6 +65,8 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static int16_t cpu_block[SIG_HALF_LEN];          // hier “holt” die CPU die Daten hin
+static volatile uint32_t cpu_blocks = 0;
 
 /* USER CODE END 0 */
 
@@ -122,14 +126,33 @@ int main(void)
 #if SIG_USE_TIM2_DMA_TEST
     // Simple visibility: toggle LED when HT/TC counts change.
     static uint32_t last_ht = 0, last_tc = 0;
+
+    // HT: erste Hälfte ist fertig, DMA schreibt gerade in zweite Hälfte -> sicher lesen
     if (sig_dma_ht_count != last_ht) {
       last_ht = sig_dma_ht_count;
+
+      memcpy(cpu_block, &sig_dma_buf[0], SIG_HALF_LEN * sizeof(int16_t));
+      cpu_blocks++;
+
+      // optional: Sichtbarkeit
       HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
     }
+
+    // TC: zweite Hälfte ist fertig, DMA schreibt gerade wieder in erste Hälfte -> sicher lesen
     if (sig_dma_tc_count != last_tc) {
       last_tc = sig_dma_tc_count;
+
+      memcpy(cpu_block, &sig_dma_buf[SIG_HALF_LEN], SIG_HALF_LEN * sizeof(int16_t));
+      cpu_blocks++;
+
+      // optional: Sichtbarkeit
       HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
     }
+
+    //if (cpu_blocks == 500) {
+    //  __BKPT(0);
+    //}
+
 #else
     //if (SigGen_Available() >= SIG_BLOCK_SIZE) {
     //  SigGen_ReadBlock(block, SIG_BLOCK_SIZE);
