@@ -53,6 +53,7 @@
 /* USER CODE BEGIN Includes */
 #include "signal_gen.h"
 #include <string.h>
+#include "arm_math.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -93,6 +94,19 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
  */
 static int16_t cpu_block[SIG_HALF_LEN];
 static int16_t cpu_block_processed[SIG_HALF_LEN];
+
+/* ===== FFT Debug Buffers ===== */
+#define FFT_N     SIG_HALF_LEN
+#define FFT_BINS  (FFT_N/2u)
+
+static arm_cfft_radix4_instance_q15 s_fft;
+
+/* Interleaved complex: re0, im0, re1, im1, ... (in-place FFT) */
+volatile q15_t g_fft_buf[2u * FFT_N];
+
+/* Magnitude (wir lesen nur 0..N/2) */
+volatile q15_t g_fft_mag[FFT_BINS + 1u];
+volatile uint32_t g_fft_frame = 0;
 
 /** @brief Counter of processed half-blocks (for debugging/telemetry). */
 static volatile uint32_t cpu_blocks = 0;
@@ -146,6 +160,7 @@ int main(void)
   MX_USB_OTG_FS_PCD_Init();
 
   /* USER CODE BEGIN 2 */
+  arm_cfft_radix4_init_q15(&s_fft, FFT_N, 0, 1);
 #if SIG_USE_TIM2_DMA_TEST
   /**
    * Start the audio pipeline:
@@ -189,6 +204,20 @@ int main(void)
       /* 1) Snapshot stable input half into CPU buffer */
       memcpy(cpu_block, &sig_dma_buf[0], SIG_HALF_LEN * sizeof(int16_t));
 
+      /* ===== FFT: cpu_block -> complex buffer (imag=0) ===== */
+      for (uint32_t i = 0; i < FFT_N; i++) {
+        g_fft_buf[2u*i + 0u] = (q15_t)cpu_block[i];  // Re
+        g_fft_buf[2u*i + 1u] = 0;                    // Im
+      }
+
+      /* In-place complex FFT (Radix-4) */
+      arm_cfft_radix4_q15(&s_fft, (q15_t*)g_fft_buf);
+
+      /* Magnitude: wir berechnen erstmal die ersten N/2+1 Werte */
+      arm_cmplx_mag_q15((q15_t*)g_fft_buf, (q15_t*)g_fft_mag, FFT_BINS + 1u);
+
+      g_fft_frame++;
+
       /* 2) DSP placeholder: copy-through (replace with real processing later) */
       memcpy(cpu_block_processed, cpu_block, SIG_HALF_LEN * sizeof(int16_t));
 
@@ -210,6 +239,20 @@ int main(void)
 
       /* 1) Snapshot stable input half into CPU buffer */
       memcpy(cpu_block, &sig_dma_buf[SIG_HALF_LEN], SIG_HALF_LEN * sizeof(int16_t));
+
+      /* ===== FFT: cpu_block -> complex buffer (imag=0) ===== */
+      for (uint32_t i = 0; i < FFT_N; i++) {
+        g_fft_buf[2u*i + 0u] = (q15_t)cpu_block[i];  // Re
+        g_fft_buf[2u*i + 1u] = 0;                    // Im
+      }
+
+      /* In-place complex FFT (Radix-4) */
+      arm_cfft_radix4_q15(&s_fft, (q15_t*)g_fft_buf);
+
+      /* Magnitude: wir berechnen erstmal die ersten N/2+1 Werte */
+      arm_cmplx_mag_q15((q15_t*)g_fft_buf, (q15_t*)g_fft_mag, FFT_BINS + 1u);
+
+      g_fft_frame++;
 
       /* 2) DSP placeholder: copy-through (replace with real processing later) */
       memcpy(cpu_block_processed, cpu_block, SIG_HALF_LEN * sizeof(int16_t));
