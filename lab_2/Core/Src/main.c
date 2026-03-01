@@ -52,8 +52,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "signal_gen.h"
-#include <string.h>
 #include "arm_math.h"
+#include <stdint.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -69,8 +70,43 @@
  * double buffer:
  *   - first half:  [0 .. SIG_HALF_LEN-1]
  *   - second half: [SIG_HALF_LEN .. SIG_DMA_BUF_LEN-1]
+ *
+ * The DMA driver raises two interrupts:
+ *   - HT (half transfer): first half stable, second half currently filling
+ *   - TC (transfer complete): second half stable, first half currently filling
  */
 #define SIG_HALF_LEN   (SIG_DMA_BUF_LEN / 2u)
+
+/* ===== FFT configuration (block FFT) =====
+ * We run a complex FFT over one "stable half" of the DMA buffer.
+ * With SIG_DMA_BUF_LEN = 512, SIG_HALF_LEN = 256 → FFT_N = 256.
+ */
+#define FFT_N           SIG_HALF_LEN
+#define FFT_BINS        (FFT_N / 2u)          /* unique bins for real input */
+#define FFT_MAG_COUNT   (FFT_BINS + 1u)       /* DC..Nyquist (inclusive) */
+
+/* ===== UART streaming configuration =====
+ * We transmit FFT magnitudes to the host at a low rate (10 Hz).
+ * The FFT itself may run per half-buffer; the UART rate is throttled.
+ */
+#define FFT_TX_HZ           10u
+#define FFT_TX_PERIOD_MS    (1000u / FFT_TX_HZ)
+
+/* Simple binary framing to allow robust re-synchronization on the host side. */
+#define UART_SYNC0          0xA5u
+#define UART_SYNC1          0x5Au
+
+/* Frame format (little-endian):
+ *   [0]   0xA5
+ *   [1]   0x5A
+ *   [2..5]  uint32 frame_counter
+ *   [6..7]  uint16 count (= FFT_MAG_COUNT)
+ *   [8..]   payload: count * int16 magnitudes (little-endian)
+ *   [end-2..end-1] uint16 checksum (sum of payload bytes modulo 65536)
+ *
+ * Total bytes = 2 + 4 + 2 + 2*count + 2
+ */
+#define FFT_TX_MAX_BYTES (2u + 4u + 2u + (2u * FFT_MAG_COUNT) + 2u)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -83,197 +119,273 @@ UART_HandleTypeDef huart3;
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
-/**
- * @brief CPU working buffer (one half-buffer of audio samples).
- *
- * cpu_block[]:
- *   receives a stable snapshot of the DMA input buffer half (sig_dma_buf[]).
- *
- * cpu_block_processed[]:
- *   will later carry processed samples. For now it's copy-through.
+
+/* =============================================================================
+ * CPU working buffers
+ * =============================================================================
+ * cpu_block[] is a stable snapshot of one half of sig_dma_buf[].
+ * cpu_block_processed[] is currently pass-through, reserved for later DSP.
  */
 static int16_t cpu_block[SIG_HALF_LEN];
 static int16_t cpu_block_processed[SIG_HALF_LEN];
 
-/* ===== FFT Debug Buffers ===== */
-#define FFT_N     SIG_HALF_LEN
-#define FFT_BINS  (FFT_N/2u)
-
+/* =============================================================================
+ * FFT state & debug buffers
+ * =============================================================================
+ * CMSIS-DSP radix-4 complex FFT in Q15.
+ *
+ * Input is real-valued audio (int16), mapped to complex by setting Im = 0.
+ * Output is complex bins; we compute magnitudes (Q15).
+ *
+ * NOTE ON SCALING:
+ * - CMSIS Q15 FFT implementations typically apply internal scaling to avoid
+ *   overflow. Magnitudes are "relative" and are mainly useful for visualization
+ *   unless you calibrate a scale factor.
+ */
 static arm_cfft_radix4_instance_q15 s_fft;
 
-/* Interleaved complex: re0, im0, re1, im1, ... (in-place FFT) */
+/* Interleaved complex buffer: Re0, Im0, Re1, Im1, ... (in-place FFT). */
 volatile q15_t g_fft_buf[2u * FFT_N];
 
-/* Magnitude (wir lesen nur 0..N/2) */
-volatile q15_t g_fft_mag[FFT_BINS + 1u];
+/* Magnitude spectrum: DC..Nyquist (FFT_MAG_COUNT samples). */
+volatile q15_t g_fft_mag[FFT_MAG_COUNT];
+
+/* Frame counter incremented whenever we compute a new spectrum. */
 volatile uint32_t g_fft_frame = 0;
 
-/** @brief Counter of processed half-blocks (for debugging/telemetry). */
+/* =============================================================================
+ * UART streaming buffers/state
+ * =============================================================================
+ * We build a binary frame in g_fft_tx_buf and send it periodically.
+ * The host can resynchronize using the two-byte sync marker.
+ */
+static uint8_t  g_fft_tx_buf[FFT_TX_MAX_BYTES];
+static uint32_t g_fft_last_tx_ms = 0;
+
+/* Debug counter: number of half-blocks processed. */
 static volatile uint32_t cpu_blocks = 0;
 
-/**
- * @brief Convert signed 16-bit audio sample to unsigned 12-bit DAC value.
- *
- * Input range:  int16 [-32768 .. 32767]
- * DAC expects:  12-bit unsigned [0 .. 4095] (right-aligned in DHR12R1)
- *
- * Mapping:
- *   - scale down 16->12 bits by shifting (>>4)
- *   - add midscale offset (2048) to center around Vref/2
- *   - clamp to [0, 4095]
- *
- * Note:
- *   - This is a simple truncating conversion. For better quality you can
- *     apply dithering or rounding later.
+/* =============================================================================
+ * DAC helper
+ * =============================================================================
+ * Converts signed 16-bit audio samples to 12-bit unsigned DAC values.
+ * This is only used when SIG_ENABLE_DAC_OUT is enabled.
  */
 static inline uint16_t s16_to_dac_u12(int16_t s)
 {
-  int32_t v = ((int32_t)s >> 4) + 2048;  // 16->12 bit + midscale offset
+  int32_t v = ((int32_t)s >> 4) + 2048;  /* 16->12 bit + midscale offset */
   if (v < 0)    v = 0;
   if (v > 4095) v = 4095;
   return (uint16_t)v;
 }
+
+/**
+ * @brief Simple checksum: sum of bytes modulo 65536.
+ *
+ * This is not cryptographic; it is only meant to catch obvious corruption and
+ * allow the host to drop bad frames. For USB-UART links you may omit it.
+ */
+static uint16_t checksum16(const uint8_t *p, uint32_t n)
+{
+  uint32_t s = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    s += p[i];
+  }
+  return (uint16_t)(s & 0xFFFFu);
+}
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-//static void MX_ETH_Init(void);
+/* static void MX_ETH_Init(void); */  /* Not used */
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 
 /* USER CODE BEGIN PFP */
+
+/**
+ * @brief Compute FFT magnitude spectrum for a real input block.
+ *
+ * @param[in]  in_s16   Pointer to FFT_N signed 16-bit samples.
+ *
+ * This function:
+ *  1) Copies real input into an interleaved complex buffer (Im = 0)
+ *  2) Executes an in-place complex FFT (radix-4)
+ *  3) Computes magnitudes for bins 0..N/2 (inclusive)
+ *  4) Increments g_fft_frame
+ *
+ * Notes:
+ *  - arm_cmplx_mag_q15 expects complex interleaved input length = numSamples.
+ *    Here, we pass FFT_MAG_COUNT which corresponds to the first N/2+1 bins.
+ */
+static void FFT_ProcessBlock_Q15(const int16_t *in_s16)
+{
+  /* Real -> complex (Q15) */
+  for (uint32_t i = 0; i < FFT_N; i++) {
+    g_fft_buf[2u * i + 0u] = (q15_t)in_s16[i]; /* Re */
+    g_fft_buf[2u * i + 1u] = 0;               /* Im */
+  }
+
+  /* In-place complex FFT */
+  arm_cfft_radix4_q15(&s_fft, (q15_t *)g_fft_buf);
+
+  /* Magnitude for DC..Nyquist */
+  arm_cmplx_mag_q15((q15_t *)g_fft_buf, (q15_t *)g_fft_mag, FFT_MAG_COUNT);
+
+  g_fft_frame++;
+}
+
+/**
+ * @brief Send the most recent FFT magnitude spectrum to the host via UART.
+ *
+ * The payload is the raw q15_t magnitudes (int16) in little-endian order.
+ * The host script can rescale by dividing by 32768.0.
+ *
+ * This function is intentionally blocking and low-rate (10 Hz). For higher
+ * throughput you would switch to interrupt or DMA-based UART TX.
+ */
+static void FFT_SendSpectrum_UART10Hz(void)
+{
+  const uint32_t now = HAL_GetTick();
+  if ((now - g_fft_last_tx_ms) < FFT_TX_PERIOD_MS) {
+    return;
+  }
+  g_fft_last_tx_ms = now;
+
+  uint32_t idx = 0;
+
+  /* Sync */
+  g_fft_tx_buf[idx++] = UART_SYNC0;
+  g_fft_tx_buf[idx++] = UART_SYNC1;
+
+  /* Frame counter (little-endian) */
+  const uint32_t fc = g_fft_frame;
+  g_fft_tx_buf[idx++] = (uint8_t)(fc & 0xFFu);
+  g_fft_tx_buf[idx++] = (uint8_t)((fc >> 8) & 0xFFu);
+  g_fft_tx_buf[idx++] = (uint8_t)((fc >> 16) & 0xFFu);
+  g_fft_tx_buf[idx++] = (uint8_t)((fc >> 24) & 0xFFu);
+
+  /* Count (little-endian) */
+  const uint16_t count = (uint16_t)FFT_MAG_COUNT;
+  g_fft_tx_buf[idx++] = (uint8_t)(count & 0xFFu);
+  g_fft_tx_buf[idx++] = (uint8_t)((count >> 8) & 0xFFu);
+
+  /* Payload: count * int16 magnitudes (little-endian) */
+  for (uint32_t k = 0; k < FFT_MAG_COUNT; k++) {
+    const int16_t v = (int16_t)g_fft_mag[k];
+    g_fft_tx_buf[idx++] = (uint8_t)(v & 0xFF);
+    g_fft_tx_buf[idx++] = (uint8_t)((v >> 8) & 0xFF);
+  }
+
+  /* Checksum over payload bytes only */
+  const uint32_t payload_len = 2u * FFT_MAG_COUNT;
+  const uint16_t cs = checksum16(&g_fft_tx_buf[2u + 4u + 2u], payload_len);
+  g_fft_tx_buf[idx++] = (uint8_t)(cs & 0xFFu);
+  g_fft_tx_buf[idx++] = (uint8_t)((cs >> 8) & 0xFFu);
+
+  (void)HAL_UART_Transmit(&huart3, g_fft_tx_buf, (uint16_t)idx, 50);
+}
+
 /* USER CODE END PFP */
 
 int main(void)
 {
-  /* Reset of all peripherals, init Flash interface and SysTick. */
+  /* Reset peripherals, init Flash interface and SysTick. */
   HAL_Init();
 
-  /* Configure the system clock (PLL, bus prescalers, etc.). */
+  /* Configure system clock. */
   SystemClock_Config();
 
   /* Initialize peripherals configured by CubeMX. */
   MX_GPIO_Init();
-  //MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
 
   /* USER CODE BEGIN 2 */
-  arm_cfft_radix4_init_q15(&s_fft, FFT_N, 0, 1);
-#if SIG_USE_TIM2_DMA_TEST
-  /**
-   * Start the audio pipeline:
-   *  - config TIM2 @ SIG_FS_HZ, TRGO=Update
-   *  - start input DMA (P2M) into sig_dma_buf[]
-   *  - start DAC + output DMA (M2P) from dac_dma_buf[] (if enabled)
+
+  /* Initialize CMSIS-DSP FFT instance:
+   * - FFT length: FFT_N
+   * - ifftFlag: 0 (forward FFT)
+   * - bitReverseFlag: 1 (bit reversal enabled)
    */
+  arm_cfft_radix4_init_q15(&s_fft, FFT_N, 0, 1);
+
+#if SIG_USE_TIM2_DMA_TEST
+  /* Start lockstep DMA-based audio pipeline (input + optional output). */
   SigDma_TestInit();
   SigDma_TestStart();
-#else
-  // Alternative mode (not used currently)
-  //SigGen_Init();
-  //SigGen_Start();
 #endif
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   while (1)
   {
 #if SIG_USE_TIM2_DMA_TEST
-    /**
-     * We poll the HT/TC counters which are incremented from DMA IRQ handlers.
-     * This avoids doing any heavy work in interrupt context.
-     *
-     * Lockstep rule:
-     *  - When input HT happens: first half of sig_dma_buf[] is stable and can be read.
-     *    DMA is currently filling the second half.
-     *  - When input TC happens: second half is stable and can be read.
-     *    DMA is currently filling the first half again.
-     *
-     * We write to the corresponding half of dac_dma_buf[]. Because output DMA is
-     * circular as well, writing the "inactive half" is safe.
-     */
+
+    /* We poll HT/TC counters updated by DMA IRQs. */
     static uint32_t last_ht = 0;
     static uint32_t last_tc = 0;
 
-    /* ---- Half-transfer: consume first half, produce first half ---- */
+    /* -----------------------------------------------------------------------
+     * Half-transfer: first half of sig_dma_buf[] is stable
+     * --------------------------------------------------------------------- */
     if (sig_dma_ht_count != last_ht) {
       last_ht = sig_dma_ht_count;
 
-      /* 1) Snapshot stable input half into CPU buffer */
+      /* Snapshot stable input half into CPU buffer */
       memcpy(cpu_block, &sig_dma_buf[0], SIG_HALF_LEN * sizeof(int16_t));
 
-      /* ===== FFT: cpu_block -> complex buffer (imag=0) ===== */
-      for (uint32_t i = 0; i < FFT_N; i++) {
-        g_fft_buf[2u*i + 0u] = (q15_t)cpu_block[i];  // Re
-        g_fft_buf[2u*i + 1u] = 0;                    // Im
-      }
+      /* Compute FFT spectrum for this block */
+      FFT_ProcessBlock_Q15(cpu_block);
 
-      /* In-place complex FFT (Radix-4) */
-      arm_cfft_radix4_q15(&s_fft, (q15_t*)g_fft_buf);
-
-      /* Magnitude: wir berechnen erstmal die ersten N/2+1 Werte */
-      arm_cmplx_mag_q15((q15_t*)g_fft_buf, (q15_t*)g_fft_mag, FFT_BINS + 1u);
-
-      g_fft_frame++;
-
-      /* 2) DSP placeholder: copy-through (replace with real processing later) */
+      /* Placeholder DSP: currently pass-through */
       memcpy(cpu_block_processed, cpu_block, SIG_HALF_LEN * sizeof(int16_t));
 
 #if SIG_ENABLE_DAC_OUT
-      /* 3) Fill output buffer half for DAC DMA (first half) */
+      /* Update DAC DMA first half */
       for (uint32_t i = 0; i < SIG_HALF_LEN; i++) {
         dac_dma_buf[i] = s16_to_dac_u12(cpu_block_processed[i]);
       }
 #endif
 
       cpu_blocks++;
-      /* Debug visibility: toggle LED on each processed half-block */
       HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
     }
 
-    /* ---- Transfer-complete: consume second half, produce second half ---- */
+    /* -----------------------------------------------------------------------
+     * Transfer-complete: second half of sig_dma_buf[] is stable
+     * --------------------------------------------------------------------- */
     if (sig_dma_tc_count != last_tc) {
       last_tc = sig_dma_tc_count;
 
-      /* 1) Snapshot stable input half into CPU buffer */
+      /* Snapshot stable input half into CPU buffer */
       memcpy(cpu_block, &sig_dma_buf[SIG_HALF_LEN], SIG_HALF_LEN * sizeof(int16_t));
 
-      /* ===== FFT: cpu_block -> complex buffer (imag=0) ===== */
-      for (uint32_t i = 0; i < FFT_N; i++) {
-        g_fft_buf[2u*i + 0u] = (q15_t)cpu_block[i];  // Re
-        g_fft_buf[2u*i + 1u] = 0;                    // Im
-      }
+      /* Compute FFT spectrum for this block */
+      FFT_ProcessBlock_Q15(cpu_block);
 
-      /* In-place complex FFT (Radix-4) */
-      arm_cfft_radix4_q15(&s_fft, (q15_t*)g_fft_buf);
-
-      /* Magnitude: wir berechnen erstmal die ersten N/2+1 Werte */
-      arm_cmplx_mag_q15((q15_t*)g_fft_buf, (q15_t*)g_fft_mag, FFT_BINS + 1u);
-
-      g_fft_frame++;
-
-      /* 2) DSP placeholder: copy-through (replace with real processing later) */
+      /* Placeholder DSP: currently pass-through */
       memcpy(cpu_block_processed, cpu_block, SIG_HALF_LEN * sizeof(int16_t));
 
 #if SIG_ENABLE_DAC_OUT
-      /* 3) Fill output buffer half for DAC DMA (second half) */
+      /* Update DAC DMA second half */
       for (uint32_t i = 0; i < SIG_HALF_LEN; i++) {
         dac_dma_buf[SIG_HALF_LEN + i] = s16_to_dac_u12(cpu_block_processed[i]);
       }
 #endif
 
       cpu_blocks++;
-      /* Debug visibility: toggle LED on each processed half-block */
       HAL_GPIO_TogglePin(GPIOB, LD2_Pin);
     }
 
-    /* Optional breakpoint after N blocks (useful for dumping buffers) */
-    //if (cpu_blocks == 500) { __BKPT(0); }
+    /* Throttled spectrum streaming to PC (10 Hz) */
+    FFT_SendSpectrum_UART10Hz();
 
 #else
-    /* Alternative mode (not used currently) */
+    /* Alternative mode (not used) */
 #endif
   }
 }
@@ -283,8 +395,7 @@ int main(void)
   * @retval None
   *
   * Note:
-  *   This is CubeMX-generated. It configures the PLL and bus prescalers.
-  *   The timer clock assumptions used in signal_gen.c depend on these settings.
+  *   CubeMX-generated. Timing assumptions in signal_gen.c depend on these settings.
   */
 void SystemClock_Config(void)
 {
@@ -365,7 +476,7 @@ static void MX_USB_OTG_FS_PCD_Init(void)
   * @retval None
   *
   * Note:
-  *   This is CubeMX-generated. We use LD2 for debug visibility.
+  *   CubeMX-generated. We use LD2 for debug visibility.
   */
 static void MX_GPIO_Init(void)
 {
