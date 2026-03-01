@@ -59,7 +59,8 @@ Drivers/STM32F2xx_HAL_Driver/Src/stm32f2xx_hal_pcd.c \
 Drivers/STM32F2xx_HAL_Driver/Src/stm32f2xx_ll_usb.c \
 Core/Src/system_stm32f2xx.c \
 Core/Src/sysmem.c \
-Core/Src/syscalls.c  
+Core/Src/syscalls.c \
+$(wildcard Drivers/CMSIS/Source/*/*.c)
 
 # ASM sources
 ASM_SOURCES =  \
@@ -112,7 +113,8 @@ AS_DEFS =
 # C defines
 C_DEFS =  \
 -DUSE_HAL_DRIVER \
--DSTM32F207xx
+-DSTM32F207xx \
+-DARM_MATH_CM3
 
 
 # AS includes
