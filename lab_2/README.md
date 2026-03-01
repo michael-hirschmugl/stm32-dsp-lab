@@ -1,258 +1,257 @@
-# Lab 1 — Deterministic Audio Stream (TIM2 + DMA Ping‑Pong + DAC) on STM32F207
+# Lab 2 -- Lockstep Audio Pipeline with FFT (STM32F207ZG)
 
-Lab 1 builds the **hardware‑timed streaming backbone** for later DSP labs.
+## Overview
 
-Target hardware: **STM32F207 (Nucleo‑F207ZG)**
+This lab implements a deterministic, lockstep audio processing pipeline
+on an STM32F207ZG microcontroller.\
+The system captures samples at 44.1 kHz using a timer-driven DMA
+mechanism, performs block-based FFT analysis using CMSIS-DSP (Q15), and
+streams the magnitude spectrum to a host PC via UART for live
+visualization.
 
-This lab implements:
+The design emphasizes: - Deterministic timing - Clean separation between
+interrupt context and processing context - Efficient fixed-point DSP
+using CMSIS-DSP - Structured binary communication protocol over UART -
+Cross-platform live visualization with Python and Matplotlib
 
-- **TIM2** as a single master sample clock (e.g. **44.1 kHz**)
-- **DMA in circular mode** with **Half Transfer / Transfer Complete** signaling (ping‑pong)
-- A **DDS‑based multi‑tone signal generator** (optional white noise)
-- **DAC output (PA4 / DAC_OUT1)** triggered by **TIM2_TRGO** and fed by **DMA (memory → peripheral)**
-- Clean separation between **ISR duties** (minimal) and **CPU block work** (main loop)
+------------------------------------------------------------------------
 
-**No DSP is performed in Lab 1.**  
-Lab 2+ will insert processing into the same ping‑pong work window.
+## System Architecture
 
----
+### High-Level Signal Flow
 
-## 1) Goal
+               TIM2 @ 44.1 kHz
+                     │
+                     ▼
+             DMA (P2M, circular)
+                     │
+             sig_dma_buf[] (double buffer)
+                     │
+              Main loop (poll HT/TC)
+                     │
+              cpu_block[]
+                     │
+              CMSIS-DSP FFT (Q15)
+                     │
+             Magnitude spectrum
+                     │
+                UART (binary)
+                     │
+               Python Live Plot
 
-Create a deterministic, hardware‑driven streaming system that:
+------------------------------------------------------------------------
 
-- generates **one sample per tick** (software generator)
-- moves samples with **DMA** (hardware transport)
-- exposes deterministic **half‑buffer work windows** (ping‑pong)
-- optionally outputs the stream via **DAC** using the **same master clock**
+## Embedded Side (STM32)
 
----
+### Core Concepts
 
-## 2) System Architecture (High Level)
+#### 1. Lockstep Processing
 
-A single clock domain (TIM2) drives everything:
+The DMA operates in circular mode with half-transfer (HT) and
+transfer-complete (TC) interrupts.
 
-```text
-                     +----------------------+
-                     |      TIM2 @ Fs       |
-                     |  (Update Event @ Fs) |
-                     +----------+-----------+
-                                |
-             +------------------+------------------+
-             |                                     |
-             v                                     v
-  (IRQ) TIM2_IRQHandler                      TIM2_TRGO = Update
-  SigGen_OnTick()                                 |
-  writes next sample                               v
-  into TIM2->CCR1                             +----------+
-                                             |   DAC    |
-                                             | trigger  |
-                                             +----+-----+
-                                                  |
-                                      (DMA request from DAC)
-                                                  |
-                                                  v
-                                              DMA (M2P)
-                                             dac_dma_buf[]
-                                           -> DAC->DHR12R1
-                                                  |
-                                                  v
-                                             PA4 (DAC_OUT1)
+-   HT → first half-buffer ready
+-   TC → second half-buffer ready
+
+The main loop polls counters incremented by the DMA ISR.\
+No DSP is performed inside interrupts.
+
+This guarantees: - Predictable execution - No ISR jitter from heavy
+computation - Deterministic mapping of input block → output block
+
+------------------------------------------------------------------------
+
+#### 2. Buffer Structure
+
+    sig_dma_buf[0 … N/2-1]       → first half
+    sig_dma_buf[N/2 … N-1]       → second half
+
+At each half event: 1. Copy stable half to `cpu_block[]` 2. Run FFT 3.
+Compute magnitude 4. Optionally forward to DAC 5. Stream spectrum over
+UART
+
+------------------------------------------------------------------------
+
+#### 3. FFT Configuration
+
+-   FFT length: 256
+-   Sampling rate: 44.1 kHz
+-   FFT bins transmitted: N/2 + 1 = 129
+-   Format: Q15 complex input
+-   Library: CMSIS-DSP
+
+The frequency resolution is:
+
+    Δf = Fs / N = 44100 / 256 ≈ 172.27 Hz
+
+------------------------------------------------------------------------
+
+## UART Protocol
+
+Each transmitted frame has the following format (little-endian):
+
+  Field           Size   Description
+  --------------- ------ ------------------
+  SYNC            2 B    0xA5 0x5A
+  Frame Counter   4 B    uint32
+  Count           2 B    uint16
+  Payload         2×N    int16 magnitudes
+  Checksum        2 B    Optional
+
+Payload contains `count` signed 16-bit magnitude values.
+
+------------------------------------------------------------------------
+
+## Host Side (Python)
+
+### plot_fft_uart.py
+
+Responsibilities:
+
+-   Robust stream parsing
+-   Sync detection
+-   Frame validation
+-   Conversion Q15 → float
+-   Live Matplotlib visualization
+
+The frequency axis is reconstructed using:
+
+    f[k] = k * Fs / N
+
+### Requirements
+
+Python 3.10+ recommended.
+
+Install dependencies:
+
+``` bash
+pip install pyserial numpy matplotlib
 ```
 
-In parallel, the TIM2 update also triggers the **input DMA** which captures the generated sample:
+Run:
 
-```text
-TIM2 Update DMA Request  -->  DMA (P2M)  --> sig_dma_buf[] (int16, circular)
-                                   |--> HT interrupt (first half ready)
-                                   |--> TC interrupt (second half ready)
+``` bash
+python3 plot_fft_uart.py
 ```
 
----
+------------------------------------------------------------------------
 
-## 3) Data Path Details
+## Build System
 
-### 3.1 Signal Generator (software DDS)
+The project uses a Makefile-based GCC ARM toolchain build.
 
-The generator is implemented as a small DDS bank:
+Generated artifacts are placed in:
 
-- up to **3 cosine oscillators** (compile‑time enable)
-- optional **white noise** (xorshift32)
-- output is produced **sample‑by‑sample** in `TIM2_IRQHandler`
+    build/
 
-Configuration lives in `signal_gen.h`:
+Important outputs:
 
-- `SIG_ENABLE_TONE1/2/3`
-- `SIG_TONE*_FREQ_HZ`, `SIG_TONE*_AMP`
-- `SIG_ENABLE_NOISE`, `SIG_NOISE_AMP`
-- `SIG_FS_HZ`
+-   `.elf` → Debug image
+-   `.hex` → Flashable image
+-   `.map` → Linker memory map
+-   `.bin` → Raw binary
 
-The generator output is `int16_t` samples (audio‑style signed).
+------------------------------------------------------------------------
 
-**Important implementation detail (intentional “hack”):**  
-The sample is written into **TIM2->CCR1** so that the **P2M DMA** can read a real
-peripheral register that changes every sample.
+## Flashing
 
----
+Using OpenOCD:
 
-### 3.2 TIM2: Master Sample Clock
-
-TIM2 is configured for `SIG_FS_HZ`:
-
-- Default: **44100 Hz**
-- Timer clock assumption (from current clock tree): **60 MHz**
-- `ARR` is computed to approximate Fs
-
-TIM2 provides:
-
-- **Update interrupt (UIE)** → runs `SigGen_OnTick()`
-- **Update DMA request (UDE)** → triggers the input DMA (P2M)
-- **TRGO = Update event** (`MMS=010`) → triggers DAC conversions
-
-This keeps the whole system **hardware‑timed** and **deterministic**.
-
----
-
-### 3.3 Input DMA (Peripheral → Memory): Ping‑Pong Buffer
-
-**Purpose:** capture one generated sample per tick into a circular buffer.
-
-- Source: `TIM2->CCR1`
-- Destination: `sig_dma_buf[]` (`int16_t`)
-- Mode: **circular**
-- Interrupts: **HT**, **TC**, **TE**
-
-Ping‑pong layout:
-
-```text
-sig_dma_buf (N samples):
-+-----------------------+-----------------------+
-|  first half (N/2)     |  second half (N/2)    |
-+-----------------------+-----------------------+
-        HT IRQ                     TC IRQ
+``` bash
+./scripts/openocd.sh
 ```
 
-**Safety rule:**
+Or manual:
 
-- On **HT**: DMA is writing the **second half**, so the CPU may safely read the **first half**
-- On **TC**: DMA is writing the **first half**, so the CPU may safely read the **second half**
+``` bash
+openocd -f interface/stlink.cfg -f target/stm32f2x.cfg
+```
 
-The ISR updates counters:
+Then in another terminal:
 
-- `sig_dma_ht_count`
-- `sig_dma_tc_count`
-- `sig_dma_last_is_ht` (debug convenience)
+``` bash
+arm-none-eabi-gdb build/stm32-lab-1.elf
+```
 
-The main loop watches these counters and consumes each half exactly once.
+------------------------------------------------------------------------
 
----
+## Debugging Strategy
 
-### 3.4 CPU Block Stage (no DSP yet)
+### LED Heartbeat
 
-Lab 1 does not modify audio. It only demonstrates safe block acquisition and a stable work window.
+LD2 toggles on each processed half-block.
 
-- `cpu_block[]` holds the copied input half‑buffer
-- `cpu_block_processed[]` is currently **copy‑through** (placeholder)
+### Frame Rate Monitoring
 
-This is where Lab 2 inserts DSP.
+Python prints:
 
----
+    fps ~ XX.X, buffered=YY
 
-### 3.5 DAC Output (Memory → Peripheral), TIM2‑Triggered
+This verifies: - UART throughput - Parser stability - Frame continuity
 
-**Purpose:** produce an analog signal synchronized to the same sample clock.
+------------------------------------------------------------------------
 
-- Output pin: **PA4 (DAC_OUT1)**
-- Trigger: **TIM2_TRGO** (update event)
-- DAC DMA stream: circular **M2P** transfers
-  - Source: `dac_dma_buf[]` (`uint16_t`, holds 12‑bit right‑aligned samples)
-  - Destination: `DAC->DHR12R1`
+## Performance Considerations
 
-In the main loop, when HT/TC indicates a new input half‑block, the firmware fills the corresponding half of `dac_dma_buf[]`:
+### Determinism
 
-- `int16_t` audio range `[-32768..32767]`
-- mapped to DAC unsigned 12‑bit `[0..4095]` with midscale offset (2048)
+-   Timer-triggered DMA ensures fixed sample rate
+-   No blocking inside ISR
+-   UART transmission at 10 Hz avoids bandwidth saturation
 
-This forms a lockstep “capture → optional processing → output” flow at block granularity.
+### Memory Footprint
 
----
+-   Q15 FFT avoids floating-point overhead
+-   Double buffering ensures safe concurrent access
+-   CMSIS-DSP optimized for Cortex-M3
 
-## 4) Code Structure
+------------------------------------------------------------------------
 
-### `signal_gen.h`
-- compile‑time configuration (Fs, tones, noise, buffer sizes, feature flags)
-- public API for generator, input DMA, DAC output
-- exported counters and buffers
+## Possible Extensions
 
-### `signal_gen.c`
-- TIM2 configuration (Fs + TRGO)
-- DDS + noise generator
-- input DMA (P2M) configuration and ISR hook
-- DAC configuration (trigger + DMA enable)
-- DAC DMA (M2P) configuration and ISR hook
+-   Windowing (Hann / Hamming)
+-   Log-magnitude display (dB scale)
+-   Real audio ADC input
+-   FIR filtering before FFT
+-   Real-time spectral peak detection
+-   USB CDC instead of UART
+-   DMA-based UART transmission
 
-### `main.c`
-- system init (HAL / Cube)
-- starts the pipeline (`SigDma_TestInit()`, `SigDma_TestStart()`)
-- polls HT/TC counters
-- copies stable half‑buffer into CPU workspace
-- copy‑through to processed buffer (placeholder for DSP)
-- fills DAC output half‑buffer
-- toggles an LED for activity visibility
+------------------------------------------------------------------------
 
-### `stm32f2xx_it.c`
-- minimal ISR glue only:
-  - `TIM2_IRQHandler`: clear UIF + `SigGen_OnTick()`
-  - `DMA1_Stream1_IRQHandler`: `SigDma_TestIRQHandler()`
-  - `DMA1_Stream5_IRQHandler`: `SigDac_OutDmaIRQHandler()` (optional instrumentation)
+## Learning Objectives
 
----
+By completing this lab, you should understand:
 
-## 5) What You Should Observe
+-   Timer-triggered DMA on STM32
+-   Circular double buffering
+-   Half-transfer interrupt strategy
+-   Fixed-point DSP using CMSIS
+-   Real-time constraints in embedded systems
+-   Binary protocol design
+-   Host-side visualization pipelines
 
-- `sig_dma_ht_count` and `sig_dma_tc_count` increment steadily
-- `cpu_blocks` increments once per half‑buffer consumed
-- LED toggles at a stable cadence (block rate)
-- analog output on **PA4 (DAC_OUT1)** when routed to a suitable load/amplifier
+------------------------------------------------------------------------
 
----
+## Directory Structure
 
-## 6) Hardware Notes (Nucleo‑F207ZG)
+    lab_2/
+     ├── Core/
+     ├── Drivers/
+     ├── build/
+     ├── python/
+     ├── scripts/
+     ├── Makefile
+     └── STM32F207XX_FLASH.ld
 
-- DAC output is **PA4 / DAC_OUT1** (DAC channel 1).
-- On Nucleo boards, “Arduino A* pins” are not guaranteed to match DAC pins.
-  Use the board’s pinout to locate **PA4** on the headers.
+------------------------------------------------------------------------
 
-**Electrical reality check:**
-- The DAC pin is **not** a headphone driver.
-- Prefer an amplifier / powered speaker / line‑in.
-- If you must test with headphones, use proper coupling and protection (series resistor, capacitor),
-  and keep volume expectations realistic.
+## Conclusion
 
----
+This lab demonstrates a complete real-time DSP pipeline:
 
-## 7) Why This Matters
+Deterministic sampling → Block processing → Spectral analysis → Binary
+streaming → Live visualization.
 
-This is the core architecture of many embedded audio systems:
-
-- hardware‑timed sample clock
-- DMA transport to avoid jitter
-- ping‑pong buffering for deterministic processing windows
-- output synchronized to the same clock to prevent drift
-
-Lab 1 answers the crucial pre‑DSP question:
-
-> “Is my real‑time pipeline stable, deterministic, and block‑safe?”
-
----
-
-## 8) Lab 2 Preview
-
-Lab 2 will replace “copy‑through” with real DSP:
-
-- process in the HT/TC work windows
-- analyze CPU load and headroom
-- explore latency vs. block size
-- add first effects/filters (gain, clipping, FIR/IIR, delay, etc.)
-
-Lab 1 is complete once the streaming backbone is stable and observable.
+It forms a foundation for: - Digital audio effects - Spectrum
+analyzers - Embedded signal diagnostics - Real-time monitoring systems
